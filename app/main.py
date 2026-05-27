@@ -1,6 +1,6 @@
 import uuid
 from typing import Annotated 
-from fastapi import FastAPI,File,UploadFile,BackgroundTasks,status
+from fastapi import FastAPI,File,UploadFile,BackgroundTasks,status # type: ignore
 app = FastAPI()
 def process_pdf_background(task_id: str,filename: str):
     print(f"processing{task_id}")
