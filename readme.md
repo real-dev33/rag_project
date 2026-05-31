@@ -1,1 +1,2 @@
 "# pdf_ai_rag" 
+If you are on Windows, you MUST install Tesseract OCR here [https://github.com/tesseract-ocr/tesseract/wiki/Downloads/dbfa2d4c7f51ab931fa00a2467de901bfbdb081a] before running this project.

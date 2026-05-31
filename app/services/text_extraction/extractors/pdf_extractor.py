@@ -3,15 +3,18 @@ from pathlib import Path
 from typing import List, Dict, Any, Optional
 import logging
 
-from .base import(
+from .base import (
     BaseExtractor,
     ExtractionResult,
     ExtractedText,
     DocumentType
 )
-logger=logging.getLogger(__name__)
+
+logger = logging.getLogger(__name__)
+
+
 class PDFExtractor(BaseExtractor):
-     """
+    """
     Extract text from native PDF documents using PyMuPDF.
 
     This extractor handles PDFs with embedded text (not scanned images).
@@ -22,16 +25,20 @@ class PDFExtractor(BaseExtractor):
         - extract_images: Also extract embedded images (default: False)
         - password: Password for encrypted PDFs (default: None)
     """
-     supported_extension={'.pdf'}
-     def _setup(self):
-       """configure extraction settings"""
-       self.preserve_layout=self.config.get('preserve_layout',True)
-       self.extract_image=self.config.get('extract_image',False)
-       self.password=self.config.get('password',None)
-     def can_handle(self,file_path:str)->bool:
-       """check if a file is a pdf"""
-       return Path(file_path).suffix.lower() in self.supported_extension
-     def extract(self,file_path:str)->ExtractionResult:
+
+    supported_extension = {'.pdf'}
+
+    def _setup(self):
+        """Configure extraction settings."""
+        self.preserve_layout = self.config.get('preserve_layout', True)
+        self.extract_images = self.config.get('extract_images', False)  # Fix: was 'extract_image'
+        self.password = self.config.get('password', None)
+
+    def can_handle(self, file_path: str) -> bool:
+        """Check if a file is a PDF."""
+        return Path(file_path).suffix.lower() in self.supported_extension
+
+    def extract(self, file_path: str) -> ExtractionResult:
         """
         Extract text from a PDF document.
 
@@ -46,29 +53,41 @@ class PDFExtractor(BaseExtractor):
             ExtractionResult with extracted text blocks
         """
         self.validate_file(file_path)
-        texts:list[ExtractedText]
-        errors:list[str]=[]
+
+        texts: List[ExtractedText] = []  # Fix: was uninitialized
+        errors: List[str] = []
+
+        # Fix: early scanned PDF check before opening for full extraction
+        if self.is_scanned_pdf(file_path):
+            return ExtractionResult(
+                texts=[],
+                document_type=DocumentType.PDF,
+                extraction_method="native_pdf",
+                errors=["Scanned PDF detected — use OCRExtractor instead"]
+            )
+
         try:
-            doc=pymupdf.open(file_path,password=self.password)
+            doc = pymupdf.open(file_path)
+
+            # Fix: corrected encryption logic (else was nested under wrong if)
             if doc.is_encrypted:
-               if self.password:
-                  if not doc.authenticate(self.password):
-                     raise ValueError("Incorrect password for encrypted PDF")
-               else:
-                  raise ValueError("PDF is encrypted,Password required")
-            total_pages=len(doc)
+                if self.password:
+                    if not doc.authenticate(self.password):
+                        raise ValueError("Incorrect password for encrypted PDF")
+                else:
+                    raise ValueError("PDF is encrypted, password required")
+
+            total_pages = len(doc)
             logger.info(f"Processing PDF with {total_pages} pages: {file_path}")
+
             for page_num in range(total_pages):
                 page = doc[page_num]
 
-                # Extract text with layout preservation
                 if self.preserve_layout:
-                    # Use blocks to preserve structure
                     blocks = page.get_text("dict")["blocks"]
                     page_text = self._process_blocks(blocks, page_num + 1)
                     texts.extend(page_text)
                 else:
-                    # Simple text extraction
                     text = page.get_text("text")
                     if text.strip():
                         texts.append(ExtractedText(
@@ -83,16 +102,18 @@ class PDFExtractor(BaseExtractor):
 
             doc.close()
 
-            # Calculate quality score based on extraction results
             quality_score = self._calculate_quality_score(texts, total_pages)
+
             return ExtractionResult(
                 texts=texts,
+                tables=[],
                 document_type=DocumentType.PDF,
                 total_pages=total_pages,
                 extraction_method="native_pdf",
                 quality_score=quality_score,
                 errors=errors
             )
+
         except Exception as e:
             logger.error(f"PDF extraction failed: {str(e)}")
             errors.append(str(e))
@@ -102,7 +123,8 @@ class PDFExtractor(BaseExtractor):
                 extraction_method="native_pdf",
                 errors=errors
             )
-     def _process_blocks(self, blocks: List[Dict[str, Any]], page_number: int) -> List[ExtractedText]:
+
+    def _process_blocks(self, blocks: List[Dict[str, Any]], page_number: int) -> List[ExtractedText]:
         """
         Process PDF text blocks preserving layout structure.
 
@@ -120,7 +142,6 @@ class PDFExtractor(BaseExtractor):
             if block.get("type") != 0:
                 continue
 
-            # Extract text from lines within the block
             block_text = []
             for line in block.get("lines", []):
                 line_text = ""
@@ -132,7 +153,6 @@ class PDFExtractor(BaseExtractor):
             if not content.strip():
                 continue
 
-            # Get bounding box coordinates
             bbox = block.get("bbox", [0, 0, 0, 0])
 
             extracted.append(ExtractedText(
@@ -147,7 +167,8 @@ class PDFExtractor(BaseExtractor):
             ))
 
         return extracted
-     def _calculate_quality_score(
+
+    def _calculate_quality_score(
         self,
         texts: List[ExtractedText],
         total_pages: int
@@ -172,23 +193,19 @@ class PDFExtractor(BaseExtractor):
 
         full_text = " ".join(t.content for t in texts)
 
-        # Check text density (characters per page)
         chars_per_page = len(full_text) / total_pages
-        density_score = min(chars_per_page / 1000, 1.0)  # Expect ~1000 chars/page
+        density_score = min(chars_per_page / 1000, 1.0)
 
-        # Check character diversity (unique chars / total chars)
         unique_chars = len(set(full_text))
-        diversity_score = min(unique_chars / 50, 1.0)  # Expect ~50 unique chars
+        diversity_score = min(unique_chars / 50, 1.0)
 
-        # Check for garbled text patterns (common OCR artifacts)
-        garbled_patterns = ['�', '\x00', '\ufffd']
+        garbled_patterns = ['<EFBFBD>', '\x00', '\ufffd']
         garbled_count = sum(full_text.count(p) for p in garbled_patterns)
         garbled_score = max(0, 1 - (garbled_count / max(len(full_text), 1)) * 10)
 
-        # Weighted average
         return (density_score * 0.4 + diversity_score * 0.3 + garbled_score * 0.3)
 
-     def is_scanned_pdf(self, file_path: str) -> bool:
+    def is_scanned_pdf(self, file_path: str) -> bool:
         """
         Detect if PDF is scanned (image-based) rather than native text.
 
@@ -213,12 +230,9 @@ class PDFExtractor(BaseExtractor):
 
             doc.close()
 
-            # If average chars per page is very low, likely scanned
             avg_chars = total_text_chars / min(total_pages, 5)
-            return avg_chars < 100  # Threshold for scanned detection
+            return avg_chars < 100
 
         except Exception as e:
             logger.warning(f"Could not detect PDF type: {e}")
             return False
-
-       

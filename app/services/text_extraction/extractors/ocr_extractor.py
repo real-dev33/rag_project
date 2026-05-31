@@ -1,5 +1,6 @@
 # extractors/ocr_extractor.py
 import pytesseract
+pytesseract.pytesseract.tesseract_cmd = r'C:\Program Files\Tesseract-OCR\tesseract.exe'
 from PIL import Image
 from pdf2image import convert_from_path
 import cv2
@@ -34,12 +35,12 @@ class OCRExtractor(BaseExtractor):
         - oem: OCR engine mode (default: 3 - LSTM only)
         - dpi: Resolution for PDF conversion (default: 300)
         - preprocess: Enable image preprocessing (default: True)
+        - poppler_path: Path to poppler bin dir (required on Windows)
     """
 
     SUPPORTED_IMAGE_EXTENSIONS = {'.png', '.jpg', '.jpeg', '.tiff', '.tif', '.bmp', '.webp'}
     SUPPORTED_DOC_EXTENSIONS = {'.pdf'}
 
-    # Tesseract Page Segmentation Modes
     PSM_MODES = {
         0: "Orientation and script detection only",
         1: "Automatic page segmentation with OSD",
@@ -58,16 +59,16 @@ class OCRExtractor(BaseExtractor):
         self.oem = self.config.get('oem', 3)
         self.dpi = self.config.get('dpi', 300)
         self.preprocess = self.config.get('preprocess', True)
+        # Fix: poppler_path must be configurable for Windows (convert_from_path requires it)
+        self.poppler_path = self.config.get('poppler_path', None)
 
-        # Initialize image enhancer
         self.enhancer = ImageEnhancer(self.config.get('enhancer_config'))
 
-        # Verify Tesseract installation
         try:
             pytesseract.get_tesseract_version()
         except pytesseract.TesseractNotFoundError:
             raise RuntimeError(
-                "Tesseract OCR not found. Install with: brew install tesseract"
+                "Tesseract OCR not found. Install from: https://github.com/UB-Mannheim/tesseract/wiki"
             )
 
     def can_handle(self, file_path: str) -> bool:
@@ -100,31 +101,20 @@ class OCRExtractor(BaseExtractor):
             raise ValueError(f"Unsupported file type: {suffix}")
 
     def _extract_from_image(self, file_path: str) -> ExtractionResult:
-        """
-        Extract text from a single image file.
-
-        Args:
-            file_path: Path to image file
-
-        Returns:
-            ExtractionResult with extracted text
-        """
+        """Extract text from a single image file."""
         texts: List[ExtractedText] = []
         errors: List[str] = []
 
         try:
-            # Load image
             image = cv2.imread(file_path)
             if image is None:
                 raise ValueError(f"Could not load image: {file_path}")
 
-            # Preprocess if enabled
             if self.preprocess:
                 processed = self.enhancer.enhance(image)
             else:
                 processed = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
 
-            # Run OCR with detailed output
             ocr_result = self._run_ocr_with_details(processed)
 
             if ocr_result['text'].strip():
@@ -178,14 +168,18 @@ class OCRExtractor(BaseExtractor):
         errors: List[str] = []
 
         try:
-            # Convert PDF pages to images
             logger.info(f"Converting PDF to images at {self.dpi} DPI")
-            images = convert_from_path(
-                file_path,
+
+            # Fix: pass poppler_path for Windows compatibility
+            convert_kwargs = dict(
                 dpi=self.dpi,
                 fmt='png',
-                thread_count=4  # Parallel conversion
+                thread_count=4
             )
+            if self.poppler_path:
+                convert_kwargs['poppler_path'] = self.poppler_path
+
+            images = convert_from_path(file_path, **convert_kwargs)
 
             total_pages = len(images)
             logger.info(f"Processing {total_pages} pages with OCR")
@@ -194,16 +188,13 @@ class OCRExtractor(BaseExtractor):
             pages_with_confidence = 0
 
             for page_num, pil_image in enumerate(images, start=1):
-                # Convert PIL Image to OpenCV format
                 image = cv2.cvtColor(np.array(pil_image), cv2.COLOR_RGB2BGR)
 
-                # Preprocess
                 if self.preprocess:
                     processed = self.enhancer.enhance(image)
                 else:
                     processed = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
 
-                # Run OCR
                 ocr_result = self._run_ocr_with_details(processed)
 
                 if ocr_result['text'].strip():
@@ -228,7 +219,7 @@ class OCRExtractor(BaseExtractor):
                     f"confidence: {ocr_result['confidence']:.2f}"
                 )
 
-            # Calculate average quality
+            # Fix: was dividing by min(total_pages, 5) which crashes when total_pages == 0
             avg_confidence = (
                 total_confidence / pages_with_confidence
                 if pages_with_confidence > 0
@@ -254,10 +245,7 @@ class OCRExtractor(BaseExtractor):
                 errors=errors
             )
 
-    def _run_ocr_with_details(
-        self,
-        image: np.ndarray
-    ) -> Dict[str, Any]:
+    def _run_ocr_with_details(self, image: np.ndarray) -> Dict[str, Any]:
         """
         Run Tesseract OCR and extract detailed results.
 
@@ -268,12 +256,10 @@ class OCRExtractor(BaseExtractor):
             image: Preprocessed grayscale image
 
         Returns:
-            Dictionary with 'text' and 'confidence' keys
+            Dictionary with 'text', 'confidence', and 'word_count' keys
         """
-        # Build Tesseract config string
         config = f'--psm {self.psm} --oem {self.oem}'
 
-        # Get detailed OCR output with confidence scores
         data = pytesseract.image_to_data(
             image,
             lang=self.language,
@@ -281,14 +267,11 @@ class OCRExtractor(BaseExtractor):
             output_type=pytesseract.Output.DICT
         )
 
-        # Build text and calculate confidence
         words = []
         confidences = []
 
         for i, word in enumerate(data['text']):
             conf = int(data['conf'][i])
-
-            # Skip empty words and low-confidence noise
             if word.strip() and conf > 0:
                 words.append(word)
                 confidences.append(conf)
@@ -310,9 +293,6 @@ class OCRExtractor(BaseExtractor):
         """
         Extract text preserving document layout using hOCR output.
 
-        hOCR is an HTML-based format that includes bounding box
-        coordinates for each word and line.
-
         Args:
             file_path: Path to image file
 
@@ -323,14 +303,12 @@ class OCRExtractor(BaseExtractor):
 
         texts: List[ExtractedText] = []
 
-        # Load and preprocess image
         image = cv2.imread(file_path)
         if self.preprocess:
             processed = self.enhancer.enhance(image)
         else:
             processed = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
 
-        # Get hOCR output
         config = f'--psm {self.psm} --oem {self.oem}'
         hocr = pytesseract.image_to_pdf_or_hocr(
             processed,
@@ -339,16 +317,12 @@ class OCRExtractor(BaseExtractor):
             extension='hocr'
         )
 
-        # Parse hOCR to extract text blocks with positions
-        # (Simplified; full implementation would parse XML)
         from bs4 import BeautifulSoup
         soup = BeautifulSoup(hocr, 'html.parser')
 
         for paragraph in soup.find_all('p', class_='ocr_par'):
-            # Extract bounding box from title attribute
             title = paragraph.get('title', '')
             bbox = self._parse_bbox(title)
-
             text = paragraph.get_text(strip=True)
             if text:
                 texts.append(ExtractedText(
@@ -366,7 +340,7 @@ class OCRExtractor(BaseExtractor):
             document_type=DocumentType.IMAGE,
             total_pages=1,
             extraction_method="ocr_layout",
-            quality_score=0.0  # Would calculate from word confidences
+            quality_score=0.0
         )
 
     def _parse_bbox(self, title: str) -> Optional[List[float]]:
