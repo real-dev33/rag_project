@@ -12,6 +12,9 @@ class Settings(BaseSettings):
     embedding_model: str = "sentence-transformers/all-MiniLM-L6-v2"
     # Embedding dimension must match the model above (MiniLM = 384)
     embedding_dimension: int = 384
+    gemini_api_key: str=""
+    groq_api_key: str = ""
+    openrouter_api_key: str = ""
 
     # ---- PostgreSQL (optional, for task logging) ----
     # Leave blank for now if you haven't set up PostgreSQL

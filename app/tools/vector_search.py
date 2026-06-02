@@ -19,6 +19,7 @@ class VectorSearchProvider:
             url=settings.qdrant_url,
             api_key=settings.qdrant_api_key,
             prefer_grpc=False,
+            timeout=60.0
         )
         self.collection_name = collection_name
         self._init_collection()
@@ -98,11 +99,11 @@ class VectorSearchProvider:
             score_threshold: Minimum similarity score
 
         Returns:
-            List of matching chunks with scores
+            List of matching chunks with scores, including text, page, chunk_type, metadata, and similarity score
         """
-        results = self.client.search(
+        response = self.client.query_points(
             collection_name=self.collection_name,
-            query_vector=query_vector,
+            query=query_vector,
             limit=top_k,
             score_threshold=score_threshold,
         )
@@ -111,8 +112,9 @@ class VectorSearchProvider:
             {
                 "text": hit.payload.get("text", ""),
                 "page": hit.payload.get("page"),
+                "chunk_type": hit.payload.get("chunk_type"),
                 "metadata": hit.payload.get("metadata", {}),
                 "score": hit.score,
             }
-            for hit in results
+            for hit in response.points
         ]

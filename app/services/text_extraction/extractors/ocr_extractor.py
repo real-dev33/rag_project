@@ -189,7 +189,7 @@ class OCRExtractor(BaseExtractor):
 
             for page_num, pil_image in enumerate(images, start=1):
                 image = cv2.cvtColor(np.array(pil_image), cv2.COLOR_RGB2BGR)
-
+                pil_image.close()
                 if self.preprocess:
                     processed = self.enhancer.enhance(image)
                 else:
